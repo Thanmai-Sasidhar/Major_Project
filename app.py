@@ -101,7 +101,7 @@ st.markdown("""
 # =========================
 @st.cache_data
 def load_data():
-    return pd.read_csv("/Users/ats/Desktop/ProjectM/data/space_objects.csv")
+    return pd.read_csv("data/space_objects.csv")
 
 data = load_data()
 
