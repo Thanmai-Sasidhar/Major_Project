@@ -1,0 +1,215 @@
+import streamlit as st
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+
+# =========================
+# LOAD DATASET
+# =========================
+@st.cache_data
+def load_data():
+    return pd.read_csv("C:\\Users\\prasa\\OneDrive\\Desktop\\SpaceDebris_STGAT\\data\\space_objects.csv")
+
+data = load_data()
+
+# =========================
+# COMPUTE SEMI-MAJOR AXIS
+# =========================
+def compute_semi_major_axis(mean_motion):
+    mu = 398600  # km^3/s^2
+
+    # rev/day → rad/sec
+    n = mean_motion * 2 * np.pi / 86400
+
+    a = (mu / (n ** 2)) ** (1/3)
+    return a
+
+# =========================
+# ORBIT GENERATION
+# =========================
+def generate_orbit(a, e, i, raan, argp, M0):
+    t = np.linspace(0, 2*np.pi, 200)
+
+    r = a * (1 - e**2) / (1 + e * np.cos(t))
+
+    x = r * np.cos(t)
+    y = r * np.sin(t)
+    z = r * np.sin(np.radians(i))
+
+    return np.vstack((x, y, z)).T
+
+# =========================
+# DISTANCE FUNCTION
+# =========================
+def compute_min_distance(p1, p2):
+    min_dist = float("inf")
+
+    for i in range(min(len(p1), len(p2))):
+        d = np.linalg.norm(p1[i] - p2[i])
+        if d < min_dist:
+            min_dist = d
+
+    return min_dist
+
+# =========================
+# UI
+# =========================
+st.title("🛰️ Satellite Collision Detection System")
+
+st.sidebar.header("Enter Satellite Orbital Elements")
+
+a = st.sidebar.number_input("Semi-major Axis (km)", value=7000.0)
+
+e = st.sidebar.number_input(
+    "Eccentricity",
+    min_value=0.0,
+    max_value=1.0,
+    value=0.00100,
+    step=0.00001,
+    format="%.5f"
+)
+
+i = st.sidebar.number_input("Inclination (deg)", value=98.0)
+raan = st.sidebar.number_input("RAAN (deg)", value=0.0)
+argp = st.sidebar.number_input("Argument of Perigee (deg)", value=0.0)
+M0 = st.sidebar.number_input("Mean Anomaly (deg)", value=0.0)
+
+run = st.sidebar.button("🚀 Run Simulation")
+
+# =========================
+# MAIN
+# =========================
+if run:
+
+    st.subheader("🛰️ Generated Orbit")
+
+    user_orbit = generate_orbit(a, e, i, raan, argp, M0)
+
+    # =========================
+    # COLLISION CHECK
+    # =========================
+    st.subheader("🔍 Checking Collision Risk")
+
+    min_distance = float("inf")
+    risky_satellite_name = None
+    results = []
+
+    for _, row in data.iterrows():
+        try:
+            # Compute real semi-major axis
+            mean_motion = row['MEAN_MOTION']
+            a2 = compute_semi_major_axis(mean_motion)
+
+            e2 = row['ECCENTRICITY']
+            i2 = row['INCLINATION']
+            raan2 = row['RA_OF_ASC_NODE']
+            argp2 = row['ARG_OF_PERICENTER']
+            M02 = row['MEAN_ANOMALY']
+
+            name = row['OBJECT_NAME']
+
+            other_orbit = generate_orbit(a2, e2, i2, raan2, argp2, M02)
+
+            dist = compute_min_distance(user_orbit, other_orbit)
+
+            results.append((name, dist))
+
+            if dist < min_distance:
+                min_distance = dist
+                risky_satellite_name = name
+
+        except:
+            continue
+
+    # =========================
+    # RESULTS
+    # =========================
+    st.metric("Minimum Distance (km)", f"{min_distance:.5f}")
+
+    if risky_satellite_name:
+        st.write(f"🚨 Closest Satellite: **{risky_satellite_name}**")
+
+    # =========================
+    # RISK CLASSIFICATION
+    # =========================
+    if min_distance < 25:
+        st.error("🚨 VERY DANGEROUS COLLISION RISK (< 25 km)")
+    elif min_distance <= 75:
+        st.warning("⚠️ MEDIUM COLLISION RISK (25–75 km)")
+    else:
+        st.success("✅ LOW COLLISION RISK (> 75 km)")
+
+    # =========================
+    # TOP 5 RISKS
+    # =========================
+    st.subheader("⚠️ Top 5 Closest Satellites")
+
+    results_sorted = sorted(results, key=lambda x: x[1])[:5]
+
+    for name, dist in results_sorted:
+        if dist < 25:
+            label = "🚨 VERY DANGEROUS"
+        elif dist <= 75:
+            label = "⚠️ MEDIUM"
+        else:
+            label = "✅ LOW"
+
+        st.write(f"{name} → {dist:.5f} km → {label}")
+
+    # =========================
+    # VISUALIZATION
+    # =========================
+    st.subheader("🌍 3D Orbit Visualization")
+
+    fig = go.Figure()
+
+    # USER ORBIT
+    fig.add_trace(go.Scatter3d(
+        x=user_orbit[:,0],
+        y=user_orbit[:,1],
+        z=user_orbit[:,2],
+        mode='lines',
+        name='User Satellite',
+        line=dict(color='blue', width=5)
+    ))
+
+    # PLOT TOP 5 SATELLITES
+    for name, dist in results_sorted:
+        row = data[data['OBJECT_NAME'] == name].iloc[0]
+
+        a2 = compute_semi_major_axis(row['MEAN_MOTION'])
+        e2 = row['ECCENTRICITY']
+        i2 = row['INCLINATION']
+        raan2 = row['RA_OF_ASC_NODE']
+        argp2 = row['ARG_OF_PERICENTER']
+        M02 = row['MEAN_ANOMALY']
+
+        orbit = generate_orbit(a2, e2, i2, raan2, argp2, M02)
+
+        if dist < 25:
+            color = "red"
+        elif dist <= 75:
+            color = "orange"
+        else:
+            color = "green"
+
+        fig.add_trace(go.Scatter3d(
+            x=orbit[:,0],
+            y=orbit[:,1],
+            z=orbit[:,2],
+            mode='lines',
+            line=dict(color=color),
+            opacity=0.7,
+            name=name
+        ))
+
+    fig.update_layout(
+        scene=dict(
+            xaxis_title="X (km)",
+            yaxis_title="Y (km)",
+            zaxis_title="Z (km)"
+        ),
+        margin=dict(l=0, r=0, b=0, t=40)
+    )
+
+    st.plotly_chart(fig, use_container_width=True)

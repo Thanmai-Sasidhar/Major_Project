@@ -1,0 +1,332 @@
+import streamlit as st
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+
+# =========================
+# SAFE GAT IMPORTS
+# =========================
+try:
+    import torch
+    import torch.nn.functional as F
+    from torch_geometric.data import Data
+    from torch_geometric.nn import GATConv
+    GAT_AVAILABLE = True
+except:
+    GAT_AVAILABLE = False
+
+# =========================
+# PAGE CONFIG
+# =========================
+st.set_page_config(page_title="Satellite Collision Intelligence System", layout="wide")
+
+# =========================
+# 🔥 UI STYLING
+# =========================
+st.markdown("""
+<style>
+body {
+    background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+    color: white;
+}
+
+/* Title */
+h1 {
+    text-align: center;
+    font-size: 45px;
+    font-weight: bold;
+    background: linear-gradient(to right, #00c6ff, #0072ff);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+/* Cards */
+.card {
+    background: rgba(255,255,255,0.1);
+    backdrop-filter: blur(15px);
+    border-radius: 20px;
+    padding: 20px;
+    margin: 10px;
+    text-align: center;
+    box-shadow: 0px 0px 20px rgba(0,0,0,0.4);
+    font-size: 20px;
+}
+
+/* Blinking */
+@keyframes blink {
+    0% {opacity: 1;}
+    50% {opacity: 0.3;}
+    100% {opacity: 1;}
+}
+
+.blink {
+    animation: blink 1s infinite;
+    color: red;
+    font-weight: bold;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# =========================
+# LOAD DATA
+# =========================
+@st.cache_data
+def load_data():
+    return pd.read_csv("C:\\Users\\prasa\\OneDrive\\Desktop\\SpaceDebris_STGAT\\data\\space_objects.csv")
+
+data = load_data()
+
+# =========================
+# FUNCTIONS
+# =========================
+def compute_semi_major_axis(mean_motion):
+    mu = 398600
+    n = mean_motion * 2 * np.pi / 86400
+    return (mu / (n ** 2)) ** (1/3)
+
+def generate_orbit(a, e, i, raan, argp, M0):
+    t = np.linspace(0, 2*np.pi, 200)
+    r = a * (1 - e**2) / (1 + e * np.cos(t))
+    x = r * np.cos(t)
+    y = r * np.sin(t)
+    z = r * np.sin(np.radians(i))
+    return np.vstack((x, y, z)).T
+
+def compute_min_distance(p1, p2):
+    return np.min(np.linalg.norm(p1 - p2, axis=1))
+
+# =========================
+# LOAD GAT MODEL
+# =========================
+if GAT_AVAILABLE:
+    class GATModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gat1 = GATConv(6, 32)
+            self.gat2 = GATConv(32, 16)
+            self.fc = torch.nn.Linear(16, 3)
+
+        def forward(self, data):
+            x, edge_index = data.x, data.edge_index
+            x = self.gat1(x, edge_index)
+            x = F.relu(x)
+            x = self.gat2(x, edge_index)
+            x = F.relu(x)
+            return self.fc(x)
+
+    model = GATModel()
+    try:
+        model.load_state_dict(torch.load("gat_modelll.pth", map_location="cpu"))
+        model.eval()
+    except:
+        model = None
+else:
+    model = None
+
+# =========================
+# HEADER
+# =========================
+st.title("🛰️ Satellite Collision Intelligence System")
+
+# =========================
+# INPUT
+# =========================
+st.sidebar.header("📡 Satellite Input")
+
+a = st.sidebar.number_input("Semi-major Axis", value=7000.0)
+e = st.sidebar.number_input("Eccentricity", value=0.001, format="%.5f")
+i = st.sidebar.number_input("Inclination", value=98.0)
+raan = st.sidebar.number_input("RAAN", value=0.0)
+argp = st.sidebar.number_input("Argument of Perigee", value=0.0)
+M0 = st.sidebar.number_input("Mean Anomaly", value=0.0)
+
+run = st.sidebar.button("🚀 Run Simulation")
+
+# =========================
+# MAIN
+# =========================
+if run:
+
+    user_orbit = generate_orbit(a, e, i, raan, argp, M0)
+
+    results = []
+
+    for _, row in data.iterrows():
+        try:
+            a2 = compute_semi_major_axis(row['MEAN_MOTION'])
+
+            orbit = generate_orbit(
+                a2,
+                row['ECCENTRICITY'],
+                row['INCLINATION'],
+                row['RA_OF_ASC_NODE'],
+                row['ARG_OF_PERICENTER'],
+                row['MEAN_ANOMALY']
+            )
+
+            dist = compute_min_distance(user_orbit, orbit)
+
+            results.append((row['OBJECT_NAME'], dist, orbit))
+        except:
+            continue
+
+    results_sorted = sorted(results, key=lambda x: x[1])[:5]
+
+    # =========================
+    # TOP 5
+    # =========================
+    st.subheader("🚨 Top 5 Closest Satellites")
+
+    for name, dist, _ in results_sorted:
+        st.write(f"{name} → {dist:.2f} km")
+
+    min_distance = results_sorted[0][1]
+
+    # =========================
+    # PHYSICS RISK
+    # =========================
+    if min_distance < 25:
+        st.markdown("<div class='card blink'>🚨 VERY DANGEROUS</div>", unsafe_allow_html=True)
+    elif min_distance <= 75:
+        st.markdown("<div class='card'>⚠️ MEDIUM RISK</div>", unsafe_allow_html=True)
+    else:
+        st.markdown("<div class='card'>✅ LOW RISK</div>", unsafe_allow_html=True)
+
+    # =========================
+    # 🤖 GAT PREDICTION
+    # =========================
+    st.subheader("🤖 AI Prediction (GAT)")
+
+    if model is not None:
+        try:
+            from sklearn.preprocessing import StandardScaler
+            from sklearn.neighbors import NearestNeighbors
+
+            features = []
+
+            for _, row in data.iterrows():
+                a2 = compute_semi_major_axis(row['MEAN_MOTION'])
+                features.append([
+                    a2,
+                    row['ECCENTRICITY'],
+                    row['INCLINATION'],
+                    row['RA_OF_ASC_NODE'],
+                    row['ARG_OF_PERICENTER'],
+                    row['MEAN_ANOMALY']
+                ])
+
+            scaler = StandardScaler()
+            features_scaled = scaler.fit_transform(features)
+
+            x = torch.tensor(features_scaled, dtype=torch.float)
+
+            k = 5
+            nbrs = NearestNeighbors(n_neighbors=k).fit(features_scaled)
+            _, indices = nbrs.kneighbors(features_scaled)
+
+            edges = []
+            for i_idx in range(len(features_scaled)):
+                for j_idx in range(1, k):
+                    edges.append([i_idx, indices[i_idx][j_idx]])
+
+            user_feat = np.array([[a, e, i, raan, argp, M0]])
+            user_feat_scaled = scaler.transform(user_feat)
+
+            user_tensor = torch.tensor(user_feat_scaled, dtype=torch.float)
+
+            new_x = torch.cat([x, user_tensor], dim=0)
+            user_idx = len(new_x) - 1
+
+            for idx in range(len(x)):
+                edges.append([idx, user_idx])
+                edges.append([user_idx, idx])
+
+            edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+
+            graph = Data(x=new_x, edge_index=edge_index)
+
+            with torch.no_grad():
+                output = model(graph)
+
+            logits = output[-1]
+            probs = torch.softmax(logits, dim=0)
+
+            high = probs[2].item()
+            med = probs[1].item()
+            conf = max(probs).item()
+
+            st.markdown(f"<div class='card'>Confidence: {conf:.2f}</div>", unsafe_allow_html=True)
+
+            if min_distance > 100:
+                st.markdown("<div class='card'>✅ LOW (Physics override)</div>", unsafe_allow_html=True)
+            elif high > 0.6:
+                st.markdown("<div class='card blink'>🚨 HIGH RISK (AI)</div>", unsafe_allow_html=True)
+            elif med > 0.5:
+                st.markdown("<div class='card'>⚠️ MEDIUM (AI)</div>", unsafe_allow_html=True)
+            else:
+                st.markdown("<div class='card'>✅ LOW (AI)</div>", unsafe_allow_html=True)
+
+        except Exception as e:
+            st.warning("GAT error")
+            st.write(e)
+
+    else:
+        st.warning("GAT model not loaded")
+
+    # =========================
+    # 🌍 VISUALIZATION
+    # =========================
+    st.subheader("🌍 3D Orbit Visualization")
+
+    fig = go.Figure()
+
+    # Earth
+    R = 6371
+    u = np.linspace(0, 2*np.pi, 50)
+    v = np.linspace(0, np.pi, 50)
+
+    x_e = R * np.outer(np.cos(u), np.sin(v))
+    y_e = R * np.outer(np.sin(u), np.sin(v))
+    z_e = R * np.outer(np.ones(np.size(u)), np.cos(v))
+
+    fig.add_trace(go.Surface(x=x_e, y=y_e, z=z_e, opacity=0.5, colorscale='Blues'))
+
+    # User orbit
+    fig.add_trace(go.Scatter3d(
+        x=user_orbit[:,0],
+        y=user_orbit[:,1],
+        z=user_orbit[:,2],
+        mode='lines',
+        line=dict(color='cyan', width=5),
+        name="User"
+    ))
+
+    # Highlight risky satellite
+    risky_name = results_sorted[0][0]
+
+    for name, dist, orbit in results_sorted:
+
+        if name == risky_name:
+            fig.add_trace(go.Scatter3d(
+                x=orbit[:,0],
+                y=orbit[:,1],
+                z=orbit[:,2],
+                mode='lines',
+                line=dict(color='red', width=6, dash='dash'),
+                name=f"{name} (RISK)"
+            ))
+        else:
+            color = "orange" if dist <= 75 else "green"
+
+            fig.add_trace(go.Scatter3d(
+                x=orbit[:,0],
+                y=orbit[:,1],
+                z=orbit[:,2],
+                mode='lines',
+                line=dict(color=color),
+                name=name
+            ))
+
+    fig.update_layout(scene=dict(bgcolor="black"))
+
+    st.plotly_chart(fig, use_container_width=True)
